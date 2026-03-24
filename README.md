@@ -1,4 +1,4 @@
-Using Pico 2 W
+Using Pico 2 W. Using Micropython. Thonny.
 
 Buttons:        # Just the color to match my hardware
   GP2 = Red
