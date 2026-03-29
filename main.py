@@ -1,134 +1,98 @@
 import asyncio
 import aioble
 import bluetooth
-import time
-import struct
-import ubinascii
 from machine import Pin
-from micropython import const
 
 ##### Setup BLE #####
-
-# 1. Setup UUIDs
 _MIDI_SERVICE_UUID = bluetooth.UUID("03B80E5A-EDE8-4B33-A751-6CE34EC4C700")
 _MIDI_CHAR_UUID = bluetooth.UUID("7772E5DB-3868-4112-A1A9-F2669D106BF3")
 
-# 2. Register Service & Characteristic
 midi_service = aioble.Service(_MIDI_SERVICE_UUID)
 midi_characteristic = aioble.Characteristic(midi_service, _MIDI_CHAR_UUID, read=True, write=True, notify=True)
-
 aioble.register_services(midi_service)
 
-##### Function in below #####
+##### Def Buttonns #####
+buttons = [
+    {"pin": 2, "cc": 0x2C, "name": "Red"},
+    {"pin": 3, "cc": 0x2D, "name": "Blue"},
+    {"pin": 4, "cc": 0x31, "name": "Yellow"},
+    {"pin": 5, "cc": 0x32, "name": "Green"},
+]
 
-# Define key first
+debounce_ms = 170
 
-debounce = 0.2
-red_button = Pin(2, Pin.IN, Pin.PULL_UP)
-blue_button = Pin(3, Pin.IN, Pin.PULL_UP)
-yellow_button = Pin(4, Pin.IN, Pin.PULL_UP)
-green_button = Pin(5, Pin.IN, Pin.PULL_UP)
-red_toggle = 0
-blue_toggle = 0
-yellow_toggle = 0
-green_toggle = 0
-
-# 3. The key press section while connected
-
-async def key_press(connection):
-    print("Starting Output")
+# 3. To handle key press
+async def handle_button(btn_conf, connection):
+    pin = Pin(btn_conf["pin"], Pin.IN, Pin.PULL_UP)
+    toggle = 0
+    last_state = 1 # 1 是未按下 (PULL_UP)
     
     while True:
+        current_state = pin.value()
         
-        global red_toggle
-        
-        if red_button.value() == 0 and red_toggle == 0:  # Button pressed
-                print("Pressed Red")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X2C, 0X00])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent Red 00")
-                red_toggle = 1
-                await asyncio.sleep(debounce)
-
-        if red_button.value() == 0 and red_toggle == 1:  # Button pressed
-                print("Pressed Red")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X2C, 0X7F])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent Red 7F")
-                red_toggle = 0
-                await asyncio.sleep(debounce)
+        # 偵測按下動作 (從 1 變 0) - Detect Pin short to GND
+        if last_state == 1 and current_state == 0:
+            print(f"Pressed {btn_conf['name']}")
             
-        global blue_toggle
-        
-        if blue_button.value() == 0 and blue_toggle == 0:  # Button pressed
-                print("Pressed Blue")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X2D, 0X00])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent Blue 00")
-                blue_toggle = 1
-                await asyncio.sleep(debounce)
-
-        if blue_button.value() == 0 and blue_toggle == 1:  # Button pressed
-                print("Pressed Blue")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X2D, 0X7F])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent Blue 7F")
-                blue_toggle = 0
-                await asyncio.sleep(debounce)
+            # 切換 MIDI 數值 (00 或 7F)
+            val = 0x7F if toggle == 0 else 0x00
+            txdata = bytearray([0x80, 0x80, 0xB0, btn_conf["cc"], val])
             
-        global yellow_toggle
+            try:
+                midi_characteristic.notify(connection, txdata)
+                print(f"Sent {btn_conf['name']} {val:02X}")
+                toggle = 1 - toggle # 切換狀態
+            except Exception as e:
+                print(f"Notify error: {e}")
+                break # 發生錯誤（通常是斷開連接）跳出循環
+                
+            # 只針對這一個按鍵進行消抖，不會影響其他 Task
+            await asyncio.sleep_ms(debounce_ms)
         
-        if yellow_button.value() == 0 and yellow_toggle == 0:  # Button pressed
-                print("Pressed yellow")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X31, 0X00])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent yellow 00")
-                yellow_toggle = 1
-                await asyncio.sleep(debounce)
+        last_state = current_state
+        # 給予極短的釋放時間讓 CPU 處理其他協程
+        await asyncio.sleep_ms(10)
 
-        if yellow_button.value() == 0 and yellow_toggle == 1:  # Button pressed
-                print("Pressed yellow")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X31, 0X7F])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent yellow 7F")
-                yellow_toggle = 0
-                await asyncio.sleep(debounce)
-            
-        global green_toggle
-        
-        if green_button.value() == 0 and green_toggle == 0:  # Button pressed
-                print("Pressed green")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X32, 0X00])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent green 00")
-                green_toggle = 1
-                await asyncio.sleep(debounce)
-
-        if green_button.value() == 0 and green_toggle == 1:  # Button pressed
-                print("Pressed green")
-                txdata = bytearray([0x80, 0X80, 0XB0, 0X32, 0X7F])
-                midi_characteristic.notify(connection, txdata)
-                print("Sent green 7F")
-                green_toggle = 0
-                await asyncio.sleep(debounce)
-             
-# 4. The Main Loop
-async def main():
+# 2. Loop key scan (Part.3)
+async def key_press_handler(connection):
+    print("Starting Multi-Button Output")
+    tasks = []
     
+    # 為每個按鍵建立一個併發任務
+    for item in buttons:
+        tasks.append(asyncio.create_task(handle_button(item, connection)))
+    
+    # 等待直到連接斷開（監控連線狀態）
+    try:
+        await connection.disconnected()
+    finally:
+        # 斷開後取消所有按鍵任務
+        for t in tasks:
+            t.cancel()
+        print("Cleaning up button tasks...")
+
+# 1. Main Loop
+async def main():
     while True:
         print("Advertising 'BK-Pico2W-MIDI-CTR'...")
-        # Wait here until a device (phone/PC) connects
-        connection = await aioble.advertise(20_000, name="BK-Pico2W-MIDI-CTR", services=[_MIDI_SERVICE_UUID])
-        
-        print(f"Connected to {connection.device}!")
-        
-        # Run the key press section and wait for it to finish (on disconnect)
-        await key_press(connection)
+        try:
+            connection = await aioble.advertise(
+                250_000, 
+                name="BK-Pico2W-MIDI-CTR", 
+                services=[_MIDI_SERVICE_UUID]
+            )
+            print(f"Connected to {connection.device}!")
+            
+            # Go to loop Part.2
+            await key_press_handler(connection)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Error: {e}")
         
         print("Disconnected. Restarting in 2 seconds...")
         await asyncio.sleep(2)
 
-# Start the program
 asyncio.run(main())
-
-##### The End #####
+### The End ###
